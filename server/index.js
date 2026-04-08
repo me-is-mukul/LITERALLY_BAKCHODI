@@ -7,15 +7,20 @@ import path from 'path';
 const app = express();
 const httpServer = createServer(app);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN;
-const corsOrigin = CLIENT_ORIGIN ? CLIENT_ORIGIN : true; // true reflects request origin
+const corsOrigin = CLIENT_ORIGIN ? CLIENT_ORIGIN : true;
 const io = new Server(httpServer, {
   cors: {
     origin: corsOrigin,
-    methods: ["GET", "POST"]
+    methods: ['GET', 'POST']
   }
 });
 
-// Zodiac calculation
+const staticRoot = path.resolve(process.cwd(), '../dist');
+app.use(express.static(staticRoot));
+app.get('*', (req, res) => {
+  res.sendFile(path.join(staticRoot, 'index.html'));
+});
+
 function getZodiacSign(birthDate) {
   const date = new Date(birthDate);
   const month = date.getMonth() + 1;
@@ -39,8 +44,8 @@ function getZodiacSign(birthDate) {
   for (const sign of zodiacSigns) {
     const [startMonth, startDay] = sign.start;
     const [endMonth, endDay] = sign.end;
-
     let inRange = false;
+
     if (startMonth === endMonth) {
       inRange = month === startMonth && day >= startDay && day <= endDay;
     } else if (startMonth > endMonth) {
@@ -57,75 +62,72 @@ function getZodiacSign(birthDate) {
 
 function getHints(zodiacSign) {
   const hints = {
-    'Aries': ['Courageous', 'Passionate', 'Impulsive', 'Leadership'],
-    'Taurus': ['Reliable', 'Stubborn', 'Practical', 'Sensual'],
-    'Gemini': ['Adaptable', 'Intellectual', 'Curious', 'Communicative'],
-    'Cancer': ['Emotional', 'Protective', 'Intuitive', 'Loyal'],
-    'Leo': ['Confident', 'Creative', 'Generous', 'Dramatic'],
-    'Virgo': ['Analytical', 'Practical', 'Perfectionistic', 'Detail-oriented'],
-    'Libra': ['Diplomatic', 'Fair-minded', 'Artistic', 'Social'],
-    'Scorpio': ['Secretive', 'Powerful', 'Intense', 'Mysterious'],
-    'Sagittarius': ['Optimistic', 'Adventure-loving', 'Philosophical', 'Honest'],
-    'Capricorn': ['Disciplined', 'Responsible', 'Ambitious', 'Self-controlled'],
-    'Aquarius': ['Independent', 'Intellectual', 'Humanitarian', 'Eccentric'],
-    'Pisces': ['Artistic', 'Gentle', 'Wise', 'Compassionate']
+    Aries: ['Courageous', 'Passionate', 'Impulsive', 'Leadership'],
+    Taurus: ['Reliable', 'Stubborn', 'Practical', 'Sensual'],
+    Gemini: ['Adaptable', 'Intellectual', 'Curious', 'Communicative'],
+    Cancer: ['Emotional', 'Protective', 'Intuitive', 'Loyal'],
+    Leo: ['Confident', 'Creative', 'Generous', 'Dramatic'],
+    Virgo: ['Analytical', 'Practical', 'Perfectionistic', 'Detail-oriented'],
+    Libra: ['Diplomatic', 'Fair-minded', 'Artistic', 'Social'],
+    Scorpio: ['Secretive', 'Powerful', 'Intense', 'Mysterious'],
+    Sagittarius: ['Optimistic', 'Adventure-loving', 'Philosophical', 'Honest'],
+    Capricorn: ['Disciplined', 'Responsible', 'Ambitious', 'Self-controlled'],
+    Aquarius: ['Independent', 'Intellectual', 'Humanitarian', 'Eccentric'],
+    Pisces: ['Artistic', 'Gentle', 'Wise', 'Compassionate']
   };
 
   return hints[zodiacSign] || [];
 }
 
-// Diagnostic: log engine handshake/connect errors
-io.engine.on && io.engine.on('connection_error', (err) => {
-  console.error('Socket engine connection_error:', err);
-});
-
-// In-memory state
 const rooms = new Map();
 const userRooms = new Map();
+const winningLines = [
+  [0, 1, 2],
+  [3, 4, 5],
+  [6, 7, 8],
+  [0, 3, 6],
+  [1, 4, 7],
+  [2, 5, 8],
+  [0, 4, 8],
+  [2, 4, 6]
+];
 
-// Room management
+function createEmptyGameState() {
+  return {
+    phase: 'waiting',
+    boards: Array.from({ length: 9 }, () => Array(9).fill(null)),
+    boardWinners: Array(9).fill(null),
+    currentPlayerId: null,
+    activeBoard: null,
+    macroWinner: null,
+    gameOver: false
+  };
+}
+
+function createRoom() {
+  const roomId = uuidv4();
+  rooms.set(roomId, {
+    id: roomId,
+    users: new Map(),
+    gameState: createEmptyGameState(),
+    lastActivity: Date.now()
+  });
+  return roomId;
+}
+
 function getOrCreateRoom() {
-  // Find room with < 2 people
   for (const [roomId, room] of rooms.entries()) {
     if (room.users.size < 2) {
       return roomId;
     }
   }
-
-  // Create new room
-  const roomId = uuidv4();
-  rooms.set(roomId, {
-    id: roomId,
-    users: new Map(),
-    gameState: {
-      phase: 'waiting', // waiting, guessing, results
-      birthdates: new Map(),
-      zodiacSigns: new Map(),
-      guesses: new Map(), // userId -> [guess1, guess2]
-      guessedCorrectly: new Map() // userId -> boolean
-    },
-    activity: 0,
-    lastActivity: Date.now()
-  });
-
-  return roomId;
+  return createRoom();
 }
 
-function getRoomsList() {
-  return Array.from(rooms.values()).map(room => ({
-    id: room.id,
-    occupants: room.users.size,
-    activity: room.activity
-  }));
-}
-
-function calculateActivity(room) {
-  const now = Date.now();
-  const timeSinceActivity = now - room.lastActivity;
-  
-  // Activity decays over 10 seconds
-  const decay = Math.max(0, 1 - (timeSinceActivity / 10000));
-  return decay;
+function ensureOpenRoomExists() {
+  if (!Array.from(rooms.values()).some((room) => room.users.size < 2)) {
+    createRoom();
+  }
 }
 
 function cleanupEmptyRooms() {
@@ -136,192 +138,163 @@ function cleanupEmptyRooms() {
   }
 }
 
-// Socket.IO handling
-io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
-  console.log('Handshake origin:', socket.handshake?.headers?.origin, 'address:', socket.handshake?.address);
+function getRoomsList() {
+  cleanupEmptyRooms();
+  return Array.from(rooms.values()).map((room) => ({
+    id: room.id,
+    occupants: room.users.size,
+    status: room.users.size === 2 ? 'playing' : 'waiting'
+  }));
+}
 
-  // Send current rooms
+function getRoomPlayers(room) {
+  return Array.from(room.users.values()).map((user) => ({
+    id: user.id,
+    username: user.username,
+    color: user.color,
+    avatar: user.avatar,
+    sign: user.sign
+  }));
+}
+
+function computeWinner(cells) {
+  for (const [a, b, c] of winningLines) {
+    if (cells[a] && cells[a] === cells[b] && cells[b] === cells[c]) {
+      return cells[a];
+    }
+  }
+  return null;
+}
+
+function isFull(cells) {
+  return cells.every(Boolean);
+}
+
+function startGame(room) {
+  room.gameState = createEmptyGameState();
+  room.gameState.phase = 'playing';
+  room.gameState.currentPlayerId = Array.from(room.users.keys())[0];
+  room.gameState.activeBoard = null;
+  room.gameState.macroWinner = null;
+  room.gameState.gameOver = false;
+}
+
+function sendRoomUpdate(room) {
+  io.to(room.id).emit('room_update', {
+    roomId: room.id,
+    players: getRoomPlayers(room),
+    gameState: room.gameState
+  });
+}
+
+function cleanupUserFromRoom(socket, room) {
+  if (!room) return;
+  room.users.delete(socket.id);
+  userRooms.delete(socket.id);
+  socket.leave(room.id);
+
+  if (room.users.size === 0) {
+    rooms.delete(room.id);
+  } else {
+    room.gameState = createEmptyGameState();
+    room.gameState.phase = 'waiting';
+    sendRoomUpdate(room);
+  }
+
+  io.emit('rooms_update', getRoomsList());
+  ensureOpenRoomExists();
+}
+
+io.engine.on?.('connection_error', (err) => {
+  console.error('Socket engine connection_error:', err);
+});
+
+io.on('connection', (socket) => {
   socket.on('get_rooms', () => {
     socket.emit('rooms_update', getRoomsList());
   });
 
-  // Join room
-  socket.on('join_room', ({ roomId, identity }) => {
+  socket.on('join_room', ({ roomId, identity, sign }) => {
     if (!roomId) {
       roomId = getOrCreateRoom();
     }
 
-    const room = rooms.get(roomId);
-    if (!room) return;
+    let room = rooms.get(roomId);
+    if (!room || room.users.size >= 2) {
+      roomId = getOrCreateRoom();
+      room = rooms.get(roomId);
+    }
 
-    // Add user to room
     socket.join(roomId);
     userRooms.set(socket.id, roomId);
-    
     room.users.set(socket.id, {
       id: socket.id,
       username: identity.username,
       color: identity.color,
       avatar: identity.avatar,
-      x: 50,
-      y: 50
+      sign
+    });
+    room.lastActivity = Date.now();
+
+    if (room.users.size === 2) {
+      startGame(room);
+      ensureOpenRoomExists();
+    }
+
+    socket.emit('joined_room', {
+      roomId,
+      players: getRoomPlayers(room),
+      gameState: room.gameState
     });
 
-    // Notify others in room (silently - no join message)
-    socket.to(roomId).emit('user_joined', {
-      userId: socket.id,
-      username: identity.username,
-      color: identity.color,
-      avatar: identity.avatar
-    });
-
-    // Update rooms list
+    sendRoomUpdate(room);
     io.emit('rooms_update', getRoomsList());
-
-    console.log(`User ${identity.username} joined room ${roomId}`);
   });
 
-  // Submit birthdate
-  socket.on('submit_birthdate', ({ roomId, birthDate }) => {
+  socket.on('leave_room', ({ roomId }) => {
     const room = rooms.get(roomId);
-    if (!room) return;
-
-    const zodiacSign = getZodiacSign(birthDate);
-    room.gameState.birthdates.set(socket.id, birthDate);
-    room.gameState.zodiacSigns.set(socket.id, zodiacSign);
-
-    // When both players have submitted birthdate, send hints
-    if (room.gameState.zodiacSigns.size === 2) {
-      room.gameState.phase = 'guessing';
-
-      // Get the other player's zodiac sign
-      const userIds = Array.from(room.gameState.zodiacSigns.keys());
-      const otherUserId = userIds.find(id => id !== socket.id);
-      const otherZodiacSign = room.gameState.zodiacSigns.get(otherUserId);
-      const hints = getHints(otherZodiacSign);
-
-      // Send to both players
-      io.to(roomId).emit('game_start', {
-        hints: hints,
-        guessCount: 0
-      });
-    }
+    cleanupUserFromRoom(socket, room);
   });
 
-  // Make a guess
-  socket.on('make_guess', ({ roomId, guess }) => {
+  socket.on('make_move', ({ roomId, boardIdx, cellIdx }) => {
     const room = rooms.get(roomId);
-    if (!room || room.gameState.phase !== 'guessing') return;
+    if (!room || room.gameState.phase !== 'playing') return;
+    if (room.gameState.currentPlayerId !== socket.id) return;
+    if (room.gameState.boardWinners[boardIdx] || room.gameState.boards[boardIdx][cellIdx]) return;
 
-    const zodiacSign = room.gameState.zodiacSigns.get(socket.id);
-    if (!room.gameState.guesses.has(socket.id)) {
-      room.gameState.guesses.set(socket.id, []);
+    room.gameState.boards[boardIdx][cellIdx] = socket.id;
+    const miniWinner = computeWinner(room.gameState.boards[boardIdx]);
+
+    if (miniWinner) {
+      room.gameState.boardWinners[boardIdx] = miniWinner;
+    } else if (isFull(room.gameState.boards[boardIdx])) {
+      room.gameState.boardWinners[boardIdx] = 'T';
     }
 
-    const userGuesses = room.gameState.guesses.get(socket.id);
-    userGuesses.push(guess);
+    const macroWinner = computeWinner(room.gameState.boardWinners);
+    room.gameState.macroWinner = macroWinner;
+    room.gameState.gameOver = Boolean(macroWinner) || room.gameState.boardWinners.every((value) => value !== null);
+    room.gameState.phase = room.gameState.gameOver ? 'ended' : 'playing';
 
-    // Get other player's zodiac sign to check if guess is correct
-    const userIds = Array.from(room.gameState.zodiacSigns.keys());
-    const otherUserId = userIds.find(id => id !== socket.id);
-    const otherZodiacSign = room.gameState.zodiacSigns.get(otherUserId);
+    const nextActive = room.gameState.boardWinners[cellIdx] ? null : cellIdx;
+    room.gameState.activeBoard = nextActive;
 
-    const isCorrect = guess === otherZodiacSign;
+    const nextPlayers = Array.from(room.users.keys());
+    room.gameState.currentPlayerId = room.gameState.gameOver ? null : nextPlayers.find((id) => id !== socket.id);
 
-    // Send response (without revealing correctness)
-    socket.emit('guess_response', {
-      guessCount: userGuesses.length
-    });
-
-    // Check if both players made 2 guesses or got it right
-    const userIds2 = Array.from(room.gameState.zodiacSigns.keys());
-    const allUsersGuessed = userIds2.every(id => {
-      const guesses = room.gameState.guesses.get(id) || [];
-      return guesses.length === 2 || guesses.includes(room.gameState.zodiacSigns.get(userIds2.find(u => u !== id)));
-    });
-
-    if (allUsersGuessed) {
-      room.gameState.phase = 'results';
-
-      // Calculate results for each player
-      const results = {};
-      for (const [userId, guesses] of room.gameState.guesses.entries()) {
-        const otherUserId = userIds2.find(id => id !== userId);
-        const otherZodiac = room.gameState.zodiacSigns.get(otherUserId);
-        results[userId] = guesses.includes(otherZodiac);
-      }
-
-      // Broadcast final results (don't tell who was right/wrong)
-      io.to(roomId).emit('game_results', {
-        bothCorrect: results[userIds2[0]] && results[userIds2[1]],
-        message: (results[userIds2[0]] && results[userIds2[1]]) ? 'Both guessed correctly!' : 'Not both correct. Try again?'
-      });
-    }
+    sendRoomUpdate(room);
   });
 
-  // Disconnect
   socket.on('disconnect', () => {
     const roomId = userRooms.get(socket.id);
     if (!roomId) return;
-
     const room = rooms.get(roomId);
-    if (room) {
-      room.users.delete(socket.id);
-      
-      // Notify others (silently)
-      socket.to(roomId).emit('user_left', { userId: socket.id });
-    }
-
-    userRooms.delete(socket.id);
-    cleanupEmptyRooms();
-    
-    // Update rooms list
-    io.emit('rooms_update', getRoomsList());
-
-    console.log('User disconnected:', socket.id);
+    cleanupUserFromRoom(socket, room);
   });
 });
 
-// Activity decay interval
-setInterval(() => {
-  for (const room of rooms.values()) {
-    room.activity = calculateActivity(room);
-  }
-  io.emit('rooms_update', getRoomsList());
-}, 1000);
+ensureOpenRoomExists();
 
-// Auto-create seed rooms
-function ensureMinimumRooms() {
-  if (rooms.size < 3) {
-    getOrCreateRoom();
-  }
-}
-
-setInterval(ensureMinimumRooms, 5000);
-ensureMinimumRooms();
-
-// Health / diagnostic endpoint
-app.get('/_status', (req, res) => {
-  res.json({ status: 'ok', rooms: rooms.size, origin: req.headers.origin || req.headers.host });
-});
-
-// Serve built frontend when available (production)
-const distPath = path.resolve(process.cwd(), '..', 'dist');
-try {
-  // If the Vite build exists, serve static files from it
-  // This makes the backend a single deployable image that serves the frontend
-  app.use(express.static(distPath));
-
-  // Serve index.html for SPA routes
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(distPath, 'index.html'));
-  });
-} catch (err) {
-  // if dist doesn't exist, continue — frontend can be served separately in dev
-}
-
-const PORT = process.env.PORT || 3001;
-httpServer.listen(PORT, () => {
-  console.log(`🕳️  GhostRooms server running on port ${PORT}`);
+httpServer.listen(3001, () => {
+  console.log('Socket server listening on port 3001');
 });

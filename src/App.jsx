@@ -1,15 +1,18 @@
 import { useState, useEffect } from 'react';
+import { io } from 'socket.io-client';
 import Lobby from './components/Lobby';
 import Room from './components/Room';
 import { generateUsername, generateAvatar } from './utils/identity';
 
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3001');
+
 function App() {
+  const [socket, setSocket] = useState(null);
   const [currentView, setCurrentView] = useState('lobby');
-  const [currentRoom, setCurrentRoom] = useState(null);
+  const [roomConfig, setRoomConfig] = useState(null);
   const [identity, setIdentity] = useState(null);
 
   useEffect(() => {
-    // Generate identity once on mount
     const storedIdentity = sessionStorage.getItem('identity');
     if (storedIdentity) {
       setIdentity(JSON.parse(storedIdentity));
@@ -24,17 +27,26 @@ function App() {
     }
   }, []);
 
-  const joinRoom = (roomId) => {
-    setCurrentRoom(roomId);
+  useEffect(() => {
+    const newSocket = io(SOCKET_URL);
+    setSocket(newSocket);
+
+    return () => {
+      newSocket.disconnect();
+    };
+  }, []);
+
+  const joinRoom = (config) => {
+    setRoomConfig(config);
     setCurrentView('room');
   };
 
   const leaveRoom = () => {
-    setCurrentRoom(null);
+    setRoomConfig(null);
     setCurrentView('lobby');
   };
 
-  if (!identity) {
+  if (!identity || !socket) {
     return (
       <div className="w-screen h-screen bg-black flex items-center justify-center">
         <div className="text-zinc-500 text-sm animate-pulse">materializing...</div>
@@ -43,16 +55,13 @@ function App() {
   }
 
   return (
-    <div className="w-screen h-screen overflow-hidden relative">
-      {/* Background layer (keeps visual background behind UI) */}
+    <div className="h-screen w-screen relative overflow-hidden">
       <div className="absolute inset-0 -z-10" aria-hidden />
-
-      {/* Main UI content */}
       <div className="w-full h-full relative z-10">
         {currentView === 'lobby' ? (
-          <Lobby onJoinRoom={joinRoom} identity={identity} />
+          <Lobby socket={socket} identity={identity} onJoinRoom={joinRoom} />
         ) : (
-          <Room roomId={currentRoom} identity={identity} onLeave={leaveRoom} />
+          <Room socket={socket} roomConfig={roomConfig} identity={identity} onLeave={leaveRoom} />
         )}
       </div>
     </div>
