@@ -19,9 +19,9 @@ export default function GameScreen({ socket, roomId, players, gameState, myId, o
   const getPlayerById = (id) => players.find((player) => player.id === id) || { sign: '' };
 
   return (
-    <div className="h-screen w-full overflow-hidden flex flex-row items-center justify-between px-4 py-4 gap-6">
+    <div className="h-screen w-full overflow-hidden flex flex-row items-start justify-between px-4 gap-6 pt-4">
       {/* LEFT SIDE - GAME BOARD */}
-      <div className="flex-1 flex flex-col items-center justify-center min-w-0 max-h-full">
+      <div className="flex-1 flex flex-col items-center justify-start min-w-0 max-h-full">
         <div className="grid grid-cols-3 gap-1.5 w-full max-w-md">
           {gameState.boards.map((board, boardIdx) => {
             const winnerId = gameState.boardWinners[boardIdx];
